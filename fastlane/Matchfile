@@ -1,10 +1,26 @@
+# fastlane/Matchfile
+require 'base64'
 
-GITHUB_REPOSITORY_OWNER ||= ENV["GITHUB_REPOSITORY_OWNER"]
+# Hvem som eier repoet + hvilket repo som brukes til å lagre certs/profiler
+GITHUB_REPOSITORY_OWNER ||= ENV["GITHUB_REPOSITORY_OWNER"] || "xLoopnStuff"
+MATCH_REPO              ||= ENV["MATCH_REPO"] || "Match-Caregiver"
 
-git_url("https://github.com/#{GITHUB_REPOSITORY_OWNER}/Match-Secrets.git")
-
+git_url("https://github.com/#{GITHUB_REPOSITORY_OWNER}/#{MATCH_REPO}.git")
+git_branch(ENV["MATCH_GIT_BRANCH"] || "master")
 storage_mode("git")
 
+# Standard: App Store-profiler (kan overstyres i lane med type: "development" osv.)
 type("appstore")
 
-# The docs are available on https://docs.fastlane.tools/actions/match
+# App-ID(ene) – juster om du trenger flere/andre
+app_identifier([
+  ENV["APP_IDENTIFIER"] || "com.#{ENV['TEAMID']}.loopkit.LoopCaregiver"
+])
+
+# Bruk PAT for å få tilgang til privat Match-repo (krever scope: repo)
+if ENV["GH_PAT"] && GITHUB_REPOSITORY_OWNER
+  git_basic_authorization(Base64.strict_encode64("#{GITHUB_REPOSITORY_OWNER}:#{ENV['GH_PAT']}"))
+end
+
+# Sett MATCH_READONLY=true i CI når repoet er fylt første gang
+readonly(ENV["MATCH_READONLY"] == "true")
