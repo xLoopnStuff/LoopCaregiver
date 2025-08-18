@@ -125,7 +125,7 @@ class CoreDataAccountService: AccountService {
 
     static var preview: CoreDataAccountService = {
         let result = CoreDataAccountService(containerFactory: InMemoryPersistentContainerFactory())
-        let viewContext = result.container.viewContext
+        _ = result.container.viewContext
         return result
     }()
 }
@@ -134,21 +134,31 @@ protocol PersistentContainerFactory {
     func createContainer() -> NSPersistentContainer
 }
 
+// MARK: - In-memory (for previews/tests)
+
 class InMemoryPersistentContainerFactory: PersistentContainerFactory {
     func createContainer() -> NSPersistentContainer {
         let container = NSPersistentContainer(name: storeFileName, managedObjectModel: managedObjectModel)
-        container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
-        container.loadPersistentStores(completionHandler: { _, error in
+
+        // /dev/null = in-memory
+        let desc = NSPersistentStoreDescription()
+        desc.url = URL(fileURLWithPath: "/dev/null")
+        desc.shouldMigrateStoreAutomatically = true
+        desc.shouldInferMappingModelAutomatically = true
+        container.persistentStoreDescriptions = [desc]
+
+        container.loadPersistentStores { _, error in
             if let error = error as NSError? {
                 preconditionFailure("Unresolved error \(error), \(error.userInfo)")
             }
-        })
+        }
 
         container.viewContext.automaticallyMergesChangesFromParent = true
         return container
     }
 
     var managedObjectModel: NSManagedObjectModel {
+        // VIKTIG: modellen lastes fra SPM-bundle
         return NSManagedObjectModel(contentsOf: Bundle.coreDataModelURL)!
     }
 
@@ -157,18 +167,38 @@ class InMemoryPersistentContainerFactory: PersistentContainerFactory {
     }
 }
 
+// MARK: - Ingen App Group (standard documents-sti)
+
 class NoAppGroupsPersistentContainerFactory: PersistentContainerFactory {
     func createContainer() -> NSPersistentContainer {
-        let container = NSPersistentContainer(name: "LoopCaregiver")
-        container.loadPersistentStores(completionHandler: { _, error in
+        let container = NSPersistentContainer(name: storeFileName, managedObjectModel: managedObjectModel)
+
+        // Slå på automigrering for default store
+        let desc = container.persistentStoreDescriptions.first ?? NSPersistentStoreDescription()
+        desc.shouldMigrateStoreAutomatically = true
+        desc.shouldInferMappingModelAutomatically = true
+        container.persistentStoreDescriptions = [desc]
+
+        container.loadPersistentStores { _, error in
             if let error = error as NSError? {
                 preconditionFailure("Unresolved error \(error), \(error.userInfo)")
             }
-        })
+        }
         container.viewContext.automaticallyMergesChangesFromParent = true
         return container
     }
+
+    var managedObjectModel: NSManagedObjectModel {
+        // VIKTIG: modellen lastes fra SPM-bundle
+        return NSManagedObjectModel(contentsOf: Bundle.coreDataModelURL)!
+    }
+
+    var storeFileName: String {
+        return "LoopCaregiver"
+    }
 }
+
+// MARK: - Med App Group (delt lagringssti)
 
 class AppGroupPersisentContainerFactory: PersistentContainerFactory {
     let appGroupName: String
@@ -183,18 +213,28 @@ class AppGroupPersisentContainerFactory: PersistentContainerFactory {
         switch getStoreMigrationStatus() {
         case .notRequired:
             let container = NSPersistentContainer(name: storeFileName, managedObjectModel: managedObjectModel)
-            container.persistentStoreDescriptions = [NSPersistentStoreDescription(url: storeURL)]
-            container.loadPersistentStores(completionHandler: { _, error in
+            let desc = NSPersistentStoreDescription(url: storeURL)
+            desc.shouldMigrateStoreAutomatically = true
+            desc.shouldInferMappingModelAutomatically = true
+            container.persistentStoreDescriptions = [desc]
+
+            container.loadPersistentStores { _, error in
                 if let error = error as NSError? {
                     preconditionFailure("Unresolved error \(error), \(error.userInfo)")
                 }
-            })
+            }
 
             container.viewContext.automaticallyMergesChangesFromParent = true
             return container
+
         case .required(let legacyDefaultStoreURL):
             let container = NSPersistentContainer(name: storeFileName, managedObjectModel: managedObjectModel)
-            container.loadPersistentStores(completionHandler: { _, error in
+            let desc = NSPersistentStoreDescription(url: storeURL)
+            desc.shouldMigrateStoreAutomatically = true
+            desc.shouldInferMappingModelAutomatically = true
+            container.persistentStoreDescriptions = [desc]
+
+            container.loadPersistentStores { _, error in
                 if let error = error as NSError? {
                     preconditionFailure("Unresolved error \(error), \(error.userInfo)")
                 }
@@ -204,7 +244,7 @@ class AppGroupPersisentContainerFactory: PersistentContainerFactory {
                 }
 
                 container.persistentStoreCoordinator.migrateAndDeleteStore(legacyStore, atURL: legacyDefaultStoreURL, toURL: self.storeURL)
-            })
+            }
 
             container.viewContext.automaticallyMergesChangesFromParent = true
             return container
@@ -212,25 +252,22 @@ class AppGroupPersisentContainerFactory: PersistentContainerFactory {
     }
 
     var storeURL: URL {
-        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)!.appendingPathComponent(storeFileName.appending(".sqlite"))
+        return FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroupName)!
+            .appendingPathComponent(storeFileName.appending(".sqlite"))
     }
 
     var managedObjectModel: NSManagedObjectModel {
+        // VIKTIG: modellen lastes fra SPM-bundle
         return NSManagedObjectModel(contentsOf: Bundle.coreDataModelURL)!
     }
 
     func getStoreMigrationStatus() -> StoreMigrationStatus {
         let container = NSPersistentContainer(name: storeFileName, managedObjectModel: managedObjectModel)
 
-        guard let storeDescription = container.persistentStoreDescriptions.first else {
-            return .notRequired
-        }
-
-        guard let legacyDefaultStoreURL = storeDescription.url else {
-            return .notRequired
-        }
-
-        guard FileManager.default.fileExists(atPath: legacyDefaultStoreURL.path) else {
+        guard let storeDescription = container.persistentStoreDescriptions.first,
+              let legacyDefaultStoreURL = storeDescription.url,
+              FileManager.default.fileExists(atPath: legacyDefaultStoreURL.path) else {
             return .notRequired
         }
 
@@ -247,6 +284,8 @@ class AppGroupPersisentContainerFactory: PersistentContainerFactory {
     }
 }
 
+// MARK: - Mapping
+
 extension LooperCD {
     func toLooper() -> Looper? {
         guard let identifier,
@@ -260,7 +299,16 @@ extension LooperCD {
         }
 
         // TODO: Remove force cast
-        let credentials = NightscoutCredentials(url: URL(string: nightscoutURL)!, secretKey: nightscoutAPISecret, otpURL: otpURL)
-        return Looper(identifier: identifier, name: name, nightscoutCredentials: credentials, lastSelectedDate: lastSelectedDate)
+        let credentials = NightscoutCredentials(
+            url: URL(string: nightscoutURL)!,
+            secretKey: nightscoutAPISecret,
+            otpURL: otpURL
+        )
+        return Looper(
+            identifier: identifier,
+            name: name,
+            nightscoutCredentials: credentials,
+            lastSelectedDate: lastSelectedDate
+        )
     }
 }
