@@ -1,22 +1,44 @@
-//
-//  Bundle+CoreData.swift
-//
-
 import Foundation
 import CoreData
 
 public extension Bundle {
 
-    /// Robust oppslag av Core Data-modellen, funker i SPM + app
+    // --- BAKOVERKOMPATIBELT: brukes fortsatt fra CoreDataAccountService.swift ---
+    static var coreDataModelURL: URL {
+        #if SWIFT_PACKAGE
+        if let url = Bundle.module.url(forResource: "LoopCaregiver", withExtension: "momd") {
+            return url
+        }
+        #endif
+
+        // SPM legger modellen i denne resource-bundlen inne i appen
+        if let resURL = Bundle(for: LooperCD.self)
+            .url(forResource: "LoopCaregiverKit_LoopCaregiverKit", withExtension: "bundle"),
+           let resBundle = Bundle(url: resURL),
+           let url = resBundle.url(forResource: "LoopCaregiver", withExtension: "momd") {
+            return url
+        }
+
+        // Fallbacks
+        if let url = Bundle.main.url(forResource: "LoopCaregiver", withExtension: "momd") {
+            return url
+        }
+        for b in Bundle.allFrameworks {
+            if let url = b.url(forResource: "LoopCaregiver", withExtension: "momd") {
+                return url
+            }
+        }
+        fatalError("Could not find LoopCaregiver.momd")
+    }
+
+    // --- Ny robust variant (kan tas i bruk senere) ---
     static var caregiverManagedObjectModel: NSManagedObjectModel = {
-        // 1) Best: SPM-resource bundle
         #if SWIFT_PACKAGE
         if let m = NSManagedObjectModel.mergedModel(from: [Bundle.module]) {
             return m
         }
         #endif
 
-        // 2) App-runtime: ressurs-bundlen vi fant i .ipa
         if let resURL = Bundle(for: LooperCD.self)
             .url(forResource: "LoopCaregiverKit_LoopCaregiverKit", withExtension: "bundle"),
            let resBundle = Bundle(url: resURL),
@@ -24,16 +46,13 @@ public extension Bundle {
             return m
         }
 
-        // 3) Fallback: prøv kjente bundler
         let candidates: [Bundle] = [Bundle.main, Bundle(for: LooperCD.self)] + Bundle.allFrameworks
         if let m = NSManagedObjectModel.mergedModel(from: candidates) {
             return m
         }
-
         fatalError("Could not load Core Data model for LoopCaregiver.")
     }()
 
-    /// Lag en persistent container som bruker modellen over
     static func caregiverPersistentContainer(inMemory: Bool = false) -> NSPersistentContainer {
         let container = NSPersistentContainer(
             name: "LoopCaregiverStore",
