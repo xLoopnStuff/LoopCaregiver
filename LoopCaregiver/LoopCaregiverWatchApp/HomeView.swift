@@ -106,6 +106,7 @@ struct HomeView: View {
     struct ToolbarButtonView: View {
         var remoteDataSource: RemoteDataServiceManager
         var glucoseTimelineEntry: GlucoseTimeLineEntry
+        
         var body: some View {
             Button(action: {
                 Task {
@@ -117,7 +118,8 @@ struct HomeView: View {
                     case .success(let glucoseTimelineValue):
                         LatestGlucoseRowView(glucoseValue: glucoseTimelineValue)
                     case .failure:
-                        Text("")
+                        // Workaround: Empty text for iOS 26 Beta issue FB19330113
+                        Text("                                     ")
                     }
                     ProgressView()
                         .opacity(remoteDataSource.updating ? 1.0 : 0.0)
