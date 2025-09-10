@@ -49,9 +49,9 @@ public enum GlucoseTimeLineEntry: TimelineEntry, Hashable {
     
     public static func == (lhs: GlucoseTimeLineEntry, rhs: GlucoseTimeLineEntry) -> Bool {
         switch (lhs, rhs) {
-        case (.success(let lhsValue), .success(let rhsValue)):
+        case let (.success(lhsValue), .success(rhsValue)):
             return lhsValue == rhsValue
-        case (.failure(let lhsError), .failure(let rhsError)):
+        case let (.failure(lhsError), .failure(rhsError)):
             return lhsError == rhsError
         default:
             return false
@@ -118,7 +118,6 @@ public struct GlucoseTimelineValue: Hashable {
         hasher.combine(treatmentData.creationDate)
         hasher.combine(date)
     }
-    
     
     public static func previewsValue() -> GlucoseTimelineValue {
         var recentSamples = [NewGlucoseSample]()
