@@ -55,12 +55,18 @@ jobs:
           cp "$SOURCE.cer" "$RUNNER_TEMP/repair/6BPX56RNHV.cer"
           cp "$SOURCE.p12" "$RUNNER_TEMP/repair/6BPX56RNHV.p12"
           openssl x509 -inform DER -in "$RUNNER_TEMP/repair/6BPX56RNHV.cer" -noout >/dev/null
-          # The decrypted Match p12 must contain a usable private key.
-          if ! openssl pkcs12 -in "$RUNNER_TEMP/repair/6BPX56RNHV.p12" -passin pass: -nocerts -nodes 2>/dev/null \
-            | openssl pkey -noout 2>/dev/null; then
-            echo '::error::Decrypted p12 does not contain an unprotected usable private key'; exit 1
+          # Fastlane-generated PKCS#12 files can use legacy ciphers.
+          # Check that the bundle is readable without exposing any key material.
+          # Do not assume an empty internal PKCS#12 password if this check fails.
+          if openssl pkcs12 -legacy -in "$RUNNER_TEMP/repair/6BPX56RNHV.p12" \
+              -passin pass: -nocerts -nodes 2>/dev/null \
+              | openssl pkey -noout 2>/dev/null; then
+            echo 'Loop certificate private key verified.'
+          else
+            echo '::error::PKCS#12 key could not be read with an empty password, even in legacy mode.'
+            echo '::error::This does NOT prove the key is missing. Stop here; internal PKCS#12 password or format needs checking.'
+            exit 1
           fi
-          echo 'Loop certificate and private key verified.'
 
       - name: Prepare isolated Caregiver Match repair branch
         shell: bash
