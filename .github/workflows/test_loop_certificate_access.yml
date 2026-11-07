@@ -1,0 +1,60 @@
+name: Test Loop certificate access (read-only)
+run-name: Test Loop signing access
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test_access:
+    name: Read-only Match test
+    runs-on: macos-26-intel
+    timeout-minutes: 20
+    env:
+      TEAMID: ${{ secrets.TEAMID }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+      FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+      FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+      FASTLANE_SKIP_UPDATE_CHECK: 'true'
+      MATCH_READONLY: 'true'
+
+    steps:
+      - name: Checkout Caregiver
+        uses: actions/checkout@v5
+
+      - name: Check required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in TEAMID GH_PAT MATCH_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing secret: $name"
+              exit 1
+            fi
+          done
+
+      - name: Install Fastlane dependencies
+        run: bundle install
+
+      - name: Test read-only access to Loop Match repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fastlane Match uses this authorization to clone the private repository.
+          AUTH=$(printf '%s' "${{ github.repository_owner }}:${GH_PAT}" | base64 | tr -d '\n')
+          echo "::add-mask::$AUTH"
+          export MATCH_GIT_BASIC_AUTHORIZATION="$AUTH"
+
+          # Use the existing Loop bundle ID; no certificates or profiles are created.
+          # --readonly prevents Match from writing to the signing repository.
+          bundle exec fastlane match appstore \
+            --readonly \
+            --git_url "https://github.com/${{ github.repository_owner }}/Match-Secrets.git" \
+            --git_branch master \
+            --app_identifier "com.${TEAMID}.loopkit.Loop"
+
+          echo "::notice::Loop Match repository was readable with Caregiver credentials."
