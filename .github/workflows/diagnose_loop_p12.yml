@@ -1,0 +1,67 @@
+name: Diagnose Loop P12 (read-only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GH_PAT: ${{ secrets.GH_PAT }}
+  LOOP_MATCH_PASSWORD: ${{ secrets.LOOP_MATCH_PASSWORD }}
+  MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+  GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+
+jobs:
+  diagnose:
+    runs-on: macos-26-intel
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: bundle install
+      - name: Inspect PKCS12 without exporting keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          for name in GH_PAT LOOP_MATCH_PASSWORD MATCH_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then echo "::error::Missing $name"; exit 1; fi
+          done
+          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" clone --quiet --branch master \
+            "https://github.com/$GITHUB_REPOSITORY_OWNER/Match-Secrets.git" "$RUNNER_TEMP/loop-match-diagnostic"
+          MATCH_PASSWORD="$LOOP_MATCH_PASSWORD" bundle exec ruby -r match/encryption/openssl -e \
+            'Match::Encryption::OpenSSL.new(working_directory: ARGV.fetch(0)).decrypt_files' \
+            "$RUNNER_TEMP/loop-match-diagnostic"
+          P12="$RUNNER_TEMP/loop-match-diagnostic/certs/distribution/6BPX56RNHV.p12"
+          test -s "$P12" || { echo '::error::P12 not found'; exit 1; }
+          # OpenSSL -info checks the MAC and PKCS12 structure, without printing private keys.
+          # Each candidate is passed through a protected temporary file, not command-line arguments.
+          try_password() {
+            local label="$1" candidate="$2" passfile="$RUNNER_TEMP/p12-password-candidate"
+            printf '%s' "$candidate" > "$passfile"
+            if openssl pkcs12 -legacy -in "$P12" -passin "file:$passfile" -info -noout >/dev/null 2>&1; then
+              echo "SUCCESS: PKCS12 opens with $label"
+              rm -f "$passfile"
+              return 0
+            fi
+            echo "No match: $label"
+            rm -f "$passfile"
+            return 1
+          }
+          found=false
+          try_password 'empty password' '' && found=true
+          try_password 'Fastlane default password' 'password' && found=true
+          try_password 'Loop MATCH_PASSWORD' "$LOOP_MATCH_PASSWORD" && found=true
+          try_password 'Caregiver MATCH_PASSWORD' "$MATCH_PASSWORD" && found=true
+          if [[ "$found" == true ]]; then
+            echo 'PKCS12 can be opened. No files or Apple certificates were modified.'
+          else
+            echo '::error::No tested password could open PKCS12. Stop; do not run repair.'
+            exit 1
+          fi
+      - name: Remove temporary files
+        if: always()
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/loop-match-diagnostic" "$RUNNER_TEMP/p12-password-candidate"
