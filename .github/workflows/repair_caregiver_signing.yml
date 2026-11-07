@@ -1,0 +1,144 @@
+name: Repair Caregiver signing (reuse Loop certificate)
+run-name: Repair Caregiver signing
+
+on:
+  workflow_dispatch:
+
+env:
+  TEAMID: ${{ secrets.TEAMID }}
+  GH_PAT: ${{ secrets.GH_PAT }}
+  MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+  LOOP_MATCH_PASSWORD: ${{ secrets.LOOP_MATCH_PASSWORD }}
+  FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+  FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+  FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+  GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: macos-26-intel
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Caregiver
+        uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: bundle install
+
+      - name: Verify required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in TEAMID GH_PAT MATCH_PASSWORD LOOP_MATCH_PASSWORD FASTLANE_KEY_ID FASTLANE_ISSUER_ID FASTLANE_KEY; do
+            if [[ -z "${!name:-}" ]]; then echo "::error::Missing secret: $name"; exit 1; fi
+          done
+
+      - name: Obtain and decrypt existing Loop certificate (read-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/repair"
+          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" clone --quiet --branch master \
+            "https://github.com/$GITHUB_REPOSITORY_OWNER/Match-Secrets.git" "$RUNNER_TEMP/repair/source"
+          # Fastlane Match supports both legacy and current encryption formats.
+          # Decrypt only the temporary clone using the Loop password.
+          MATCH_PASSWORD="$LOOP_MATCH_PASSWORD" bundle exec ruby -r match/encryption/openssl -e \
+            'Match::Encryption::OpenSSL.new(working_directory: ARGV.fetch(0)).decrypt_files' \
+            "$RUNNER_TEMP/repair/source"
+          SOURCE="$RUNNER_TEMP/repair/source/certs/distribution/6BPX56RNHV"
+          test -s "$SOURCE.cer" && test -s "$SOURCE.p12" || { echo '::error::Loop certificate files not found'; exit 1; }
+          cp "$SOURCE.cer" "$RUNNER_TEMP/repair/6BPX56RNHV.cer"
+          cp "$SOURCE.p12" "$RUNNER_TEMP/repair/6BPX56RNHV.p12"
+          openssl x509 -inform DER -in "$RUNNER_TEMP/repair/6BPX56RNHV.cer" -noout >/dev/null
+          # The decrypted Match p12 must contain a usable private key.
+          if ! openssl pkcs12 -in "$RUNNER_TEMP/repair/6BPX56RNHV.p12" -passin pass: -nocerts -nodes 2>/dev/null \
+            | openssl pkey -noout 2>/dev/null; then
+            echo '::error::Decrypted p12 does not contain an unprotected usable private key'; exit 1
+          fi
+          echo 'Loop certificate and private key verified.'
+
+      - name: Prepare isolated Caregiver Match repair branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          REPO="https://github.com/$GITHUB_REPOSITORY_OWNER/Match-Caregiver.git"
+          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" clone --quiet --branch master "$REPO" "$RUNNER_TEMP/repair/dest"
+          cd "$RUNNER_TEMP/repair/dest"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          BRANCH="repair-caregiver-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "REPAIR_BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          git checkout -q -b "$BRANCH"
+          # Only remove obsolete signing files in the isolated branch.
+          git rm -q --ignore-unmatch certs/distribution/'*.cer' certs/distribution/'*.p12'
+          git rm -q -r --ignore-unmatch profiles/appstore
+          if ! git diff --cached --quiet; then git commit -qm 'Prepare Caregiver signing repair'; fi
+          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" push -q origin "$BRANCH"
+          echo 'Isolated repair branch created; master is unchanged.'
+
+      - name: Import existing Loop certificate into Caregiver Match branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          export MATCH_GIT_BRANCH="$REPAIR_BRANCH"
+          export MATCH_READONLY=false
+          export MATCH_PASSWORD="$MATCH_PASSWORD"
+          export MATCH_GIT_URL="https://github.com/$GITHUB_REPOSITORY_OWNER/Match-Caregiver.git"
+          export MATCH_GIT_BASIC_AUTHORIZATION="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          # match import prompts for certificate, private key, and optional profile.
+          printf '%s\n%s\n\n' \
+            "$RUNNER_TEMP/repair/6BPX56RNHV.cer" \
+            "$RUNNER_TEMP/repair/6BPX56RNHV.p12" \
+            | bundle exec fastlane match import \
+                --type appstore \
+                --git_url "$MATCH_GIT_URL" \
+                --git_branch "$MATCH_GIT_BRANCH" \
+                --git_basic_authorization "$MATCH_GIT_BASIC_AUTHORIZATION" \
+                --skip_certificate_matching true
+
+      - name: Create Caregiver profiles using imported certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          export MATCH_GIT_BRANCH="$REPAIR_BRANCH"
+          export MATCH_READONLY=false
+          # Existing lane uses five bundle identifiers and authenticates with Apple API key.
+          bundle exec fastlane certs
+
+      - name: Verify isolated branch has certificate and five profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          cd "$RUNNER_TEMP/repair/dest"
+          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" fetch -q origin "$REPAIR_BRANCH"
+          git checkout -q -B "$REPAIR_BRANCH" "origin/$REPAIR_BRANCH"
+          test -s certs/distribution/6BPX56RNHV.cer
+          test -s certs/distribution/6BPX56RNHV.p12
+          if find certs/distribution -type f \( -name '*.cer' -o -name '*.p12' \) | grep -v '6BPX56RNHV' | grep -q .; then
+            echo '::error::Unexpected distribution certificate remains in repair branch'; exit 1
+          fi
+          COUNT="$(find profiles/appstore -type f -name '*.mobileprovision' | wc -l | tr -d ' ')"
+          if [[ "$COUNT" -lt 5 ]]; then echo "::error::Expected at least 5 profiles; found $COUNT"; exit 1; fi
+          echo 'Repair branch contains the new certificate and Caregiver profiles.'
+
+      - name: Publish verified repair to Match-Caregiver master
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          cd "$RUNNER_TEMP/repair/dest"
+          # Push is fast-forward only. If master changed concurrently, fail safely.
+          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" push origin "$REPAIR_BRANCH:master"
+          echo 'Caregiver Match master updated. No Apple certificates were revoked.'
+
+      - name: Clean up temporary decrypted key files
+        if: always()
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/repair"
