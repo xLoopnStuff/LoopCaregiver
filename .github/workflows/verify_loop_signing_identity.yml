@@ -1,0 +1,62 @@
+name: Verify Loop signing identity (read-only)
+run-name: Verify Loop signing identity
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GH_PAT: ${{ secrets.GH_PAT }}
+  LOOP_MATCH_PASSWORD: ${{ secrets.LOOP_MATCH_PASSWORD }}
+
+jobs:
+  verify:
+    runs-on: macos-26-intel
+    steps:
+      - name: Checkout Caregiver
+        uses: actions/checkout@v5
+      - name: Install dependencies
+        run: bundle install
+      - name: Verify Loop certificate via Fastlane Match and macOS keychain
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$GH_PAT" || { echo '::error::GH_PAT is missing'; exit 1; }
+          test -n "$LOOP_MATCH_PASSWORD" || { echo '::error::LOOP_MATCH_PASSWORD is missing'; exit 1; }
+          KEYCHAIN="loop-check-${GITHUB_RUN_ID}.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          cleanup() {
+            security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          export MATCH_PASSWORD="$LOOP_MATCH_PASSWORD"
+          export MATCH_READONLY=true
+          export MATCH_GIT_BRANCH=master
+          export MATCH_KEYCHAIN_NAME="$KEYCHAIN"
+          export MATCH_KEYCHAIN_PASSWORD="$KEYCHAIN_PASSWORD"
+          # Match performs the same keychain import used by a Loop build.
+          bundle exec fastlane match appstore \
+            --readonly true \
+            --git_url "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Secrets.git" \
+            --git_branch master \
+            --git_basic_authorization "$AUTH" \
+            --app_identifier "com.${{ secrets.TEAMID }}.loopkit.Loop" \
+            --skip_provisioning_profiles true \
+            --keychain_name "$KEYCHAIN" \
+            --keychain_password "$KEYCHAIN_PASSWORD"
+          echo 'Checking usable signing identities in temporary keychain...'
+          IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN")"
+          # Print only identity fingerprints and Apple Distribution subject names (no private keys).
+          printf '%s\n' "$IDENTITIES"
+          if ! printf '%s\n' "$IDENTITIES" | grep -q 'Apple Distribution\|iPhone Distribution'; then
+            echo '::error::No usable Apple Distribution signing identity was installed.'
+            exit 1
+          fi
+          echo '::notice::Fastlane Match installed a usable distribution signing identity.'
