@@ -46,8 +46,8 @@ jobs:
           ORIGINAL_DEFAULT="$(security default-keychain -d user | tr -d '"' | xargs)"
           ORIGINAL_LIST=()
           while IFS= read -r line; do
-            line="${line#"}"
-            line="${line%"}"
+            line="${line#\"}"
+            line="${line%\"}"
             line="${line#${line%%[![:space:]]*}}"
             [[ -z "$line" ]] || ORIGINAL_LIST+=("$line")
           done < <(security list-keychains -d user)
