@@ -1,0 +1,66 @@
+name: Test Loop keychain export for Caregiver (read-only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-export:
+    runs-on: macos-26-intel
+    timeout-minutes: 20
+    env:
+      GH_PAT: ${{ secrets.GH_PAT }}
+      LOOP_MATCH_PASSWORD: ${{ secrets.LOOP_MATCH_PASSWORD }}
+      TEAMID: ${{ secrets.TEAMID }}
+    steps:
+      - name: Checkout Caregiver
+        uses: actions/checkout@v5
+      - name: Install dependencies
+        run: bundle install
+      - name: Import Loop identity and test export without publishing files
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          for var in GH_PAT LOOP_MATCH_PASSWORD TEAMID; do
+            [[ -n "${!var:-}" ]] || { echo "::error::Missing $var"; exit 1; }
+          done
+          TMP="$(mktemp -d "$RUNNER_TEMP/loop-export.XXXXXX")"
+          KC="loop-export-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
+          KCPASS="$(openssl rand -hex 24)"
+          cleanup() {
+            security delete-keychain "$KC" >/dev/null 2>&1 || true
+            rm -rf "$TMP"
+          }
+          trap cleanup EXIT
+          security create-keychain -p "$KCPASS" "$KC"
+          security unlock-keychain -p "$KCPASS" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          export MATCH_PASSWORD="$LOOP_MATCH_PASSWORD"
+          export MATCH_READONLY=true
+          bundle exec fastlane match appstore \
+            --readonly true \
+            --git_url "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Secrets.git" \
+            --git_branch master \
+            --git_basic_authorization "$AUTH" \
+            --app_identifier "com.${TEAMID}.loopkit.Loop" \
+            --skip_provisioning_profiles true \
+            --keychain_name "$KC" \
+            --keychain_password "$KCPASS"
+          ID_COUNT="$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*\([0-9][0-9]*\) valid identities found.*/\1/p' | tail -1)"
+          [[ "$ID_COUNT" == 1 ]] || { echo "::error::Expected exactly one valid signing identity"; exit 1; }
+          EXPORT_PASS="$(openssl rand -hex 32)"
+          # Export from the temporary keychain; never print, upload, or commit the private key.
+          security export -k "$KC" -t identities -f pkcs12 \
+            -P "$EXPORT_PASS" -o "$TMP/identity.p12" >/dev/null
+          [[ -s "$TMP/identity.p12" ]] || { echo '::error::Exported PKCS12 is empty'; exit 1; }
+          # Check that the export contains a readable private key; do not print it.
+          if ! openssl pkcs12 -legacy -in "$TMP/identity.p12" \
+              -passin "pass:$EXPORT_PASS" -nocerts -nodes 2>/dev/null \
+              | openssl pkey -noout >/dev/null 2>&1; then
+            echo '::error::Exported PKCS12 could not be read'; exit 1
+          fi
+          echo '::notice::Success: Loop signing identity can be securely exported from a temporary keychain.'
