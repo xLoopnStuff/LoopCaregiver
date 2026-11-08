@@ -1,4 +1,4 @@
-name: Create Caregiver profiles on verified P12 branch
+name: Create Caregiver profiles (keychain visibility fixed)
 
 on:
   workflow_dispatch:
@@ -42,7 +42,22 @@ jobs:
           TMP="$(mktemp -d "$RUNNER_TEMP/caregiver-profiles.XXXXXX")"
           KC="caregiver-profiles-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
           KCPASS="$(openssl rand -hex 24)"
+          # Preserve the runner's original keychain configuration.
+          ORIGINAL_DEFAULT="$(security default-keychain -d user | tr -d '"' | xargs)"
+          ORIGINAL_LIST=()
+          while IFS= read -r line; do
+            line="${line#"}"
+            line="${line%"}"
+            line="${line#${line%%[![:space:]]*}}"
+            [[ -z "$line" ]] || ORIGINAL_LIST+=("$line")
+          done < <(security list-keychains -d user)
           cleanup() {
+            if (( ${#ORIGINAL_LIST[@]} > 0 )); then
+              security list-keychains -d user -s "${ORIGINAL_LIST[@]}" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "$ORIGINAL_DEFAULT" ]]; then
+              security default-keychain -d user -s "$ORIGINAL_DEFAULT" >/dev/null 2>&1 || true
+            fi
             security delete-keychain "$KC" >/dev/null 2>&1 || true
             rm -rf "$TMP"
           }
@@ -50,6 +65,9 @@ jobs:
           security create-keychain -p "$KCPASS" "$KC"
           security unlock-keychain -p "$KCPASS" "$KC"
           security set-keychain-settings -lut 3600 "$KC"
+          # sigh searches the user keychain list, not only match's explicit keychain.
+          security list-keychains -d user -s "$KC" "${ORIGINAL_LIST[@]}"
+          security default-keychain -d user -s "$KC"
 
           # Fastlane API key JSON is written to a temporary private file only.
           bundle exec ruby -r json -e '
@@ -81,6 +99,10 @@ jobs:
             --keychain_password "$KCPASS"
           COUNT="$(security find-identity -v -p codesigning "$KC" | awk '/valid identities found/ {print $1}' | tail -1)"
           [[ "$COUNT" == 1 ]] || { echo '::error::Staged signing identity is not valid'; exit 1; }
+          # Crucial: ensure sigh can see the identity without a keychain argument.
+          GLOBAL_COUNT="$(security find-identity -v -p codesigning | awk '/valid identities found/ {print $1}' | tail -1)"
+          [[ "${GLOBAL_COUNT:-0}" -ge 1 ]] || { echo '::error::Signing identity is not visible to sigh; stopping before Apple changes'; exit 1; }
+          echo '::notice::Signing identity is visible in the active user keychain search list.' 
 
           # With a valid certificate already present, Match should reuse it.
           # Never create a new certificate or revoke existing certificates.
