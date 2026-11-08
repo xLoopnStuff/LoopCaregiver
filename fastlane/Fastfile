@@ -1,302 +1,187 @@
-# This file contains the fastlane.tools configuration
-# You can find the documentation at https://docs.fastlane.tools
-#
-# For a list of all available actions, check out
-#
-#     https://docs.fastlane.tools/actions
-#
-# For a list of all available plugins, check out
-#
-#     https://docs.fastlane.tools/plugins/available-plugins
-#
-
+# LoopCaregiver Fastlane configuration.
+# Signing repair branch is deliberately read-only; do not modify Loop signing.
 default_platform(:ios)
 
-TEAMID = ENV["TEAMID"]
-GH_PAT = ENV["GH_PAT"]
-GITHUB_WORKSPACE = ENV["GITHUB_WORKSPACE"]
-GITHUB_REPOSITORY_OWNER = ENV["GITHUB_REPOSITORY_OWNER"]
-FASTLANE_KEY_ID = ENV["FASTLANE_KEY_ID"]
-FASTLANE_ISSUER_ID = ENV["FASTLANE_ISSUER_ID"]
-FASTLANE_KEY = ENV["FASTLANE_KEY"]
-DEVICE_NAME = ENV["DEVICE_NAME"]
-DEVICE_ID = ENV["DEVICE_ID"]
-ENV["FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT"] = "120"
+TEAMID = ENV['TEAMID']
+GH_PAT = ENV['GH_PAT']
+GITHUB_WORKSPACE = ENV['GITHUB_WORKSPACE']
+GITHUB_REPOSITORY_OWNER = ENV['GITHUB_REPOSITORY_OWNER']
+FASTLANE_KEY_ID = ENV['FASTLANE_KEY_ID']
+FASTLANE_ISSUER_ID = ENV['FASTLANE_ISSUER_ID']
+FASTLANE_KEY = ENV['FASTLANE_KEY']
+DEVICE_NAME = ENV['DEVICE_NAME']
+DEVICE_ID = ENV['DEVICE_ID']
+ENV['FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT'] = '120'
+
+CAREGIVER_SIGNING_BRANCH = 'caregiver-original-p12-42468553947-1'
+
+def caregiver_identifiers
+  root = "com.#{TEAMID}.loopkit.LoopCaregiver"
+  [root, "#{root}.IntentExtension", "#{root}.WidgetExtension",
+   "#{root}.watchkitapp", "#{root}.watchkitapp.WidgetExtension"]
+end
+
+def caregiver_match_options
+  opts = {
+    type: 'appstore',
+    git_url: "https://github.com/#{GITHUB_REPOSITORY_OWNER}/Match-Caregiver.git",
+    git_branch: CAREGIVER_SIGNING_BRANCH,
+    readonly: true,
+    generate_apple_certs: false,
+    git_basic_authorization: Base64.strict_encode64("#{GITHUB_REPOSITORY_OWNER}:#{GH_PAT}"),
+    app_identifier: caregiver_identifiers
+  }
+  if ENV['CAREGIVER_KEYCHAIN'] && !ENV['CAREGIVER_KEYCHAIN'].empty?
+    opts[:keychain_name] = ENV['CAREGIVER_KEYCHAIN']
+    opts[:keychain_password] = ENV.fetch('CAREGIVER_KEYCHAIN_PASSWORD')
+  end
+  opts
+end
 
 platform :ios do
-  desc "Build Caregiver"
+  desc 'Build Caregiver with verified, existing signing profiles'
   lane :caregiver_build do
-    setup_ci if ENV['CI']
-    
-    update_project_team(
-      path: "#{GITHUB_WORKSPACE}/LoopCaregiver/LoopCaregiver.xcodeproj",
-      teamid: "#{TEAMID}"
-    )
+    # Workflow prepares and unlocks a dedicated keychain. setup_ci would create
+    # another keychain and may hide the signing identity from xcodebuild.
+    setup_ci if ENV['CI'] && ENV['CAREGIVER_KEYCHAIN'].to_s.empty?
+
+    project = "#{GITHUB_WORKSPACE}/LoopCaregiver/LoopCaregiver.xcodeproj"
+    update_project_team(path: project, teamid: TEAMID)
 
     api_key = app_store_connect_api_key(
-      key_id: "#{FASTLANE_KEY_ID}",
-      issuer_id: "#{FASTLANE_ISSUER_ID}",
-      key_content: "#{FASTLANE_KEY}"
+      key_id: FASTLANE_KEY_ID,
+      issuer_id: FASTLANE_ISSUER_ID,
+      key_content: FASTLANE_KEY
     )
 
     previous_build_number = latest_testflight_build_number(
-      app_identifier: "com.#{TEAMID}.loopkit.LoopCaregiver",
+      app_identifier: caregiver_identifiers.first,
       api_key: api_key,
+      initial_build_number: 0
     )
-
-    current_build_number = previous_build_number + 1
-
     increment_build_number(
-      xcodeproj: "#{GITHUB_WORKSPACE}/LoopCaregiver/LoopCaregiver.xcodeproj",
-      build_number: current_build_number
-    )      
-    
-    match(
-      type: "appstore",
-      git_basic_authorization: Base64.strict_encode64("#{GITHUB_REPOSITORY_OWNER}:#{GH_PAT}"),
-      app_identifier: [
-        "com.#{TEAMID}.loopkit.LoopCaregiver",
-        "com.#{TEAMID}.loopkit.LoopCaregiver.IntentExtension",
-        "com.#{TEAMID}.loopkit.LoopCaregiver.WidgetExtension",
-        "com.#{TEAMID}.loopkit.LoopCaregiver.watchkitapp",
-        "com.#{TEAMID}.loopkit.LoopCaregiver.watchkitapp.WidgetExtension",
-      ]
+      xcodeproj: project,
+      build_number: previous_build_number + 1
     )
 
-    mapping = Actions.lane_context[
-      SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING
-    ]
+    match(**caregiver_match_options)
+    mapping = Actions.lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]
+    UI.user_error!('Match did not return a provisioning profile mapping') unless mapping
 
-    update_code_signing_settings(
-      path: "#{GITHUB_WORKSPACE}/LoopCaregiver/LoopCaregiver.xcodeproj",
-      profile_name: mapping["com.#{TEAMID}.loopkit.LoopCaregiver"],
-      code_sign_identity: "iPhone Distribution",
-      targets: ["LoopCaregiver"]
-    )
-
-    update_code_signing_settings(
-      path: "#{GITHUB_WORKSPACE}/LoopCaregiver/LoopCaregiver.xcodeproj",
-      profile_name: mapping["com.#{TEAMID}.loopkit.LoopCaregiver.IntentExtension"],
-      code_sign_identity: "iPhone Distribution",
-      targets: ["LoopCaregiverIntentExtension"]
-    )
-
-    update_code_signing_settings(
-      path: "#{GITHUB_WORKSPACE}/LoopCaregiver/LoopCaregiver.xcodeproj",
-      profile_name: mapping["com.#{TEAMID}.loopkit.LoopCaregiver.WidgetExtension"],
-      code_sign_identity: "iPhone Distribution",
-      targets: ["LoopCaregiverWidgetExtension"]
-    )
-
-    update_code_signing_settings(
-      path: "#{GITHUB_WORKSPACE}/LoopCaregiver/LoopCaregiver.xcodeproj",
-      profile_name: mapping["com.#{TEAMID}.loopkit.LoopCaregiver.watchkitapp"],
-      code_sign_identity: "iPhone Distribution",
-      targets: ["LoopCaregiverWatchApp"]
-    )
-
-    update_code_signing_settings(
-      path: "#{GITHUB_WORKSPACE}/LoopCaregiver/LoopCaregiver.xcodeproj",
-      profile_name: mapping["com.#{TEAMID}.loopkit.LoopCaregiver.watchkitapp.WidgetExtension"],
-      code_sign_identity: "iPhone Distribution",
-      targets: ["LoopCaregiverWatchAppExtension"]
-    )
+    targets = {
+      'LoopCaregiver' => caregiver_identifiers[0],
+      'LoopCaregiverIntentExtension' => caregiver_identifiers[1],
+      'LoopCaregiverWidgetExtension' => caregiver_identifiers[2],
+      'LoopCaregiverWatchApp' => caregiver_identifiers[3],
+      'LoopCaregiverWatchAppExtension' => caregiver_identifiers[4]
+    }
+    targets.each do |target, identifier|
+      profile = mapping[identifier]
+      UI.user_error!("Missing provisioning profile for #{identifier}") if profile.to_s.empty?
+      update_code_signing_settings(
+        path: project,
+        profile_name: profile,
+        code_sign_identity: 'Apple Distribution',
+        targets: [target]
+      )
+    end
 
     gym(
-      export_method: "app-store",
-      scheme: "LoopCaregiver",
-      output_name: "LoopCaregiver.ipa",
-      configuration: "Release",
+      export_method: 'app-store',
+      scheme: 'LoopCaregiver',
+      output_name: 'LoopCaregiver.ipa',
+      configuration: 'Release',
       destination: 'generic/platform=iOS',
       buildlog_path: 'buildlog'
     )
 
     copy_artifacts(
-      target_path: "artifacts",
-      artifacts: ["*.mobileprovision", "*.ipa", "*.dSYM.zip"]
+      target_path: 'artifacts',
+      artifacts: ['*.mobileprovision', '*.ipa', '*.dSYM.zip']
     )
   end
 
-  desc "Push Caregiver to TestFlight"
+  desc 'Push Caregiver to TestFlight'
   lane :caregiver_release do
     api_key = app_store_connect_api_key(
-      key_id: "#{FASTLANE_KEY_ID}",
-      issuer_id: "#{FASTLANE_ISSUER_ID}",
-      key_content: "#{FASTLANE_KEY}"
+      key_id: FASTLANE_KEY_ID,
+      issuer_id: FASTLANE_ISSUER_ID,
+      key_content: FASTLANE_KEY
     )
-    
     upload_to_testflight(
       api_key: api_key,
       skip_submission: false,
-      ipa: "LoopCaregiver.ipa",
-      skip_waiting_for_build_processing: true,
+      ipa: 'LoopCaregiver.ipa',
+      skip_waiting_for_build_processing: true
     )
   end
 
-  desc "Provision Caregiver Identifier"
+  desc 'Provision Caregiver Identifier'
   lane :caregiver_identifier do
     setup_ci if ENV['CI']
-    ENV["MATCH_READONLY"] = false.to_s
-
     app_store_connect_api_key(
-      key_id: "#{FASTLANE_KEY_ID}",
-      issuer_id: "#{FASTLANE_ISSUER_ID}",
-      key_content: "#{FASTLANE_KEY}"
+      key_id: FASTLANE_KEY_ID,
+      issuer_id: FASTLANE_ISSUER_ID,
+      key_content: FASTLANE_KEY
     )
-
     def configure_bundle_id(name, identifier, capabilities)
-      bundle_id = Spaceship::ConnectAPI::BundleId.find(identifier) || Spaceship::ConnectAPI::BundleId.create(
-        name:       name,
-        identifier: identifier,
-        platform:   "IOS"
-      )
+      bundle_id = Spaceship::ConnectAPI::BundleId.find(identifier) ||
+        Spaceship::ConnectAPI::BundleId.create(name: name, identifier: identifier, platform: 'IOS')
       existing = bundle_id.get_capabilities.map(&:capability_type)
-      capabilities.reject { |c| existing.include?(c) }.each do |cap|
+      capabilities.reject { |cap| existing.include?(cap) }.each do |cap|
         bundle_id.create_capability(cap)
       end
     end
-
-    configure_bundle_id("LoopCaregiver", "com.#{TEAMID}.loopkit.LoopCaregiver", [
-      Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS,
-    ])
-
-    configure_bundle_id("LoopCaregiverIntentExtension", "com.#{TEAMID}.loopkit.LoopCaregiver.IntentExtension", [
-      Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
-    ])
-
-    configure_bundle_id("LoopCaregiverWidgetExtension", "com.#{TEAMID}.loopkit.LoopCaregiver.WidgetExtension", [
-      Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
-    ])
-
-    configure_bundle_id("LoopCaregiverWatch", "com.#{TEAMID}.loopkit.LoopCaregiver.watchkitapp", [
-      Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
-    ])
-
-    configure_bundle_id("LoopCaregiverWatchWidgetExtension", "com.#{TEAMID}.loopkit.LoopCaregiver.watchkitapp.WidgetExtension", [
-      Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
-    ])
-
+    caregiver_identifiers.zip([
+      'LoopCaregiver', 'LoopCaregiverIntentExtension',
+      'LoopCaregiverWidgetExtension', 'LoopCaregiverWatch',
+      'LoopCaregiverWatchWidgetExtension'
+    ]).each do |identifier, name|
+      configure_bundle_id(name, identifier, [Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS])
+    end
   end
-  
-  desc "Provision Caregiver Certificate"
+
+  desc 'Inspect existing Caregiver certificate and profiles (read-only)'
   lane :certs do
-    setup_ci if ENV['CI']
-    ENV["MATCH_READONLY"] = false.to_s
-    
+    setup_ci if ENV['CI'] && ENV['CAREGIVER_KEYCHAIN'].to_s.empty?
     app_store_connect_api_key(
-      key_id: "#{FASTLANE_KEY_ID}",
-      issuer_id: "#{FASTLANE_ISSUER_ID}",
-      key_content: "#{FASTLANE_KEY}"
+      key_id: FASTLANE_KEY_ID,
+      issuer_id: FASTLANE_ISSUER_ID,
+      key_content: FASTLANE_KEY
     )
-
-    match(
-      type: "appstore",
-      force: false,
-      verbose: true,
-      git_basic_authorization: Base64.strict_encode64("#{GITHUB_REPOSITORY_OWNER}:#{GH_PAT}"),
-      app_identifier: [
-        "com.#{TEAMID}.loopkit.LoopCaregiver",
-        "com.#{TEAMID}.loopkit.LoopCaregiver.IntentExtension",
-        "com.#{TEAMID}.loopkit.LoopCaregiver.WidgetExtension",
-        "com.#{TEAMID}.loopkit.LoopCaregiver.watchkitapp",
-        "com.#{TEAMID}.loopkit.LoopCaregiver.watchkitapp.WidgetExtension",
-      ]
-    )
+    match(**caregiver_match_options)
   end
 
-  desc "Validate Secrets"
+  desc 'Validate Secrets'
   lane :validate_secrets do
     setup_ci if ENV['CI']
-    ENV["MATCH_READONLY"] = true.to_s
-    
     app_store_connect_api_key(
-      key_id: "#{FASTLANE_KEY_ID}",
-      issuer_id: "#{FASTLANE_ISSUER_ID}",
-      key_content: "#{FASTLANE_KEY}"
+      key_id: FASTLANE_KEY_ID,
+      issuer_id: FASTLANE_ISSUER_ID,
+      key_content: FASTLANE_KEY
     )
-    
-    def find_bundle_id(identifier)
-      bundle_id = Spaceship::ConnectAPI::BundleId.find(identifier)
-    end
-
-    find_bundle_id("com.#{TEAMID}.loopkit.LoopCaregiver")
-
-    match(
-      type: "appstore",
-      git_basic_authorization: Base64.strict_encode64("#{GITHUB_REPOSITORY_OWNER}:#{GH_PAT}"),
-      app_identifier: [],
-    )
-
+    Spaceship::ConnectAPI::BundleId.find(caregiver_identifiers.first)
+    match(**caregiver_match_options)
   end
 
-  desc "Nuke Certs"
+  desc 'Nuke Certs (disabled to protect working Loop certificates)'
   lane :nuke_certs do
-    setup_ci if ENV['CI']
-    ENV["MATCH_READONLY"] = false.to_s
-    
-    app_store_connect_api_key(
-      key_id: "#{FASTLANE_KEY_ID}",
-      issuer_id: "#{FASTLANE_ISSUER_ID}",
-      key_content: "#{FASTLANE_KEY}"
-    )
-    
-    match_nuke(
-      type: "appstore",
-      team_id: "#{TEAMID}",
-      skip_confirmation: true,
-      git_basic_authorization: Base64.strict_encode64("#{GITHUB_REPOSITORY_OWNER}:#{GH_PAT}")
-    )
+    UI.user_error!('Certificate revocation is disabled. Do not nuke shared Loop signing certificates.')
   end
 
-  desc "Check Certificates and Trigger Workflow for Expired or Missing Certificates"
+  desc 'Check Distribution certificate expiry without renewal'
   lane :check_and_renew_certificates do
-    setup_ci if ENV['CI']
-    ENV["MATCH_READONLY"] = false.to_s
-
-    # Authenticate using App Store Connect API Key
-    api_key = app_store_connect_api_key(
-      key_id: ENV["FASTLANE_KEY_ID"],
-      issuer_id: ENV["FASTLANE_ISSUER_ID"],
-      key_content: ENV["FASTLANE_KEY"] # Ensure valid key content
+    app_store_connect_api_key(
+      key_id: FASTLANE_KEY_ID,
+      issuer_id: FASTLANE_ISSUER_ID,
+      key_content: FASTLANE_KEY
     )
-
-    # Initialize flag to track if renewal of certificates is needed
-    new_certificate_needed = false
-
-    # Fetch all certificates
     certificates = Spaceship::ConnectAPI::Certificate.all
-
-    # Filter for Distribution Certificates
-    distribution_certs = certificates.select { |cert| cert.certificate_type == "DISTRIBUTION" }
-
-    # Handle case where no distribution certificates are found
-    if distribution_certs.empty?
-      puts "No Distribution certificates found! Triggering action to create certificate."
-      new_certificate_needed = true
-    else
-      # Check for expiration
-      distribution_certs.each do |cert|
-        expiration_date = Time.parse(cert.expiration_date)
-
-        puts "Current Distribution Certificate: #{cert.id}, Expiration date: #{expiration_date}"
-
-        if expiration_date < Time.now
-          puts "Distribution Certificate #{cert.id} is expired! Triggering action to renew certificate."
-          new_certificate_needed = true
-        else
-          puts "Distribution certificate #{cert.id} is valid. No action required."
-        end
-      end
+    distribution_certs = certificates.select { |cert| cert.certificate_type == 'DISTRIBUTION' }
+    new_certificate_needed = distribution_certs.empty? || distribution_certs.any? do |cert|
+      Time.parse(cert.expiration_date) < Time.now
     end
-
-    # Write result to new_certificate_needed.txt
-    file_path = File.expand_path('new_certificate_needed.txt')
-    File.write(file_path, new_certificate_needed ? 'true' : 'false')
-
-    # Log the absolute path and contents of the new_certificate_needed.txt file
-    puts ""
-    puts "Absolute path of new_certificate_needed.txt: #{file_path}"
-    new_certificate_needed_content = File.read(file_path)
-    puts "Certificate creation or renewal needed: #{new_certificate_needed_content}"
+    File.write(File.expand_path('new_certificate_needed.txt'), new_certificate_needed ? 'true' : 'false')
+    UI.message("Certificate review flag: #{new_certificate_needed}; no certificates were changed")
   end
 end
