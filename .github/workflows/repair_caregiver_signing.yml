@@ -22,6 +22,7 @@ jobs:
       FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
       FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
       FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+      BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
     steps:
       - name: Checkout LoopCaregiver
         uses: actions/checkout@v5
@@ -113,30 +114,5 @@ jobs:
           git commit -qm 'Stage Caregiver signing with existing Loop distribution identity'
           git -c "http.extraheader=AUTHORIZATION: basic $AUTH" push -q origin "$BRANCH"
           echo "REPAIR_BRANCH=$BRANCH" >> "$GITHUB_ENV"
-          echo "::notice::Staged encrypted signing files on $BRANCH; master unchanged."
+          echo "::notice::Staged encrypted signing files on $BRANCH; master unchanged. No Apple provisioning profiles changed."
 
-      - name: Generate Caregiver profiles on repair branch
-        shell: bash
-        env:
-          MATCH_READONLY: 'false'
-          MATCH_GENERATE_APPLE_CERTS: 'false'
-        run: |
-          set -euo pipefail
-          # The existing Fastfile's certs lane uses all five Caregiver bundle IDs.
-          # This runs only against the isolated branch, not master.
-          bundle exec fastlane certs
-
-      - name: Verify all five profiles and signing identity on repair branch
-        shell: bash
-        env:
-          MATCH_READONLY: 'true'
-        run: |
-          set -euo pipefail
-          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
-          bundle exec fastlane match appstore \
-            --readonly true \
-            --git_url "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Caregiver.git" \
-            --git_branch "$MATCH_GIT_BRANCH" \
-            --git_basic_authorization "$AUTH" \
-            --app_identifier "com.${TEAMID}.loopkit.LoopCaregiver,com.${TEAMID}.loopkit.LoopCaregiver.IntentExtension,com.${TEAMID}.loopkit.LoopCaregiver.WidgetExtension,com.${TEAMID}.loopkit.LoopCaregiver.watchkitapp,com.${TEAMID}.loopkit.LoopCaregiver.watchkitapp.WidgetExtension"
-          echo "::notice::Repair branch $MATCH_GIT_BRANCH verified. Match-Caregiver master has NOT been changed."
