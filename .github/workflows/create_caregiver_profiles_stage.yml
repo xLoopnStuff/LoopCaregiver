@@ -1,4 +1,4 @@
-name: Create Caregiver profiles on repair branch
+name: Create Caregiver profiles on verified P12 branch
 
 on:
   workflow_dispatch:
@@ -22,7 +22,7 @@ jobs:
       FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
       FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
       BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
-      REPAIR_BRANCH: caregiver-repair-42468007906-1
+      REPAIR_BRANCH: caregiver-original-p12-42468553947-1
 
     steps:
       - name: Checkout LoopCaregiver
@@ -83,12 +83,14 @@ jobs:
           [[ "$COUNT" == 1 ]] || { echo '::error::Staged signing identity is not valid'; exit 1; }
 
           # With a valid certificate already present, Match should reuse it.
+          # Never create a new certificate or revoke existing certificates.
           # This can create Apple provisioning profiles and push encrypted files
           # to REPAIR_BRANCH. It does not intentionally create/revoke certificates.
           bundle exec fastlane match appstore \
             --readonly false \
             --force false \
             --generate_apple_certs false \
+            --skip_certificate_matching false \
             --git_url "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Caregiver.git" \
             --git_branch "$REPAIR_BRANCH" \
             --git_basic_authorization "$AUTH" \
