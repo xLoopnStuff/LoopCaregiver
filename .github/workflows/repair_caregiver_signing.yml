@@ -1,4 +1,4 @@
-name: Stage Caregiver signing repair (reuse Loop certificate)
+name: Repair Caregiver signing using original Loop P12
 
 on:
   workflow_dispatch:
@@ -11,9 +11,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  stage-repair:
+  repair:
     runs-on: macos-26-intel
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       TEAMID: ${{ secrets.TEAMID }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -23,11 +23,9 @@ jobs:
     steps:
       - name: Checkout LoopCaregiver
         uses: actions/checkout@v5
-
       - name: Install dependencies
         run: bundle install
-
-      - name: Stage certificate on isolated Match-Caregiver branch
+      - name: Copy original working Loop signing files to new isolated branch
         shell: bash
         run: |
           set -euo pipefail
@@ -35,89 +33,69 @@ jobs:
           for v in TEAMID GH_PAT LOOP_MATCH_PASSWORD CAREGIVER_MATCH_PASSWORD; do
             [[ -n "${!v:-}" ]] || { echo "::error::Missing secret $v"; exit 1; }
           done
-          TMP="$(mktemp -d "$RUNNER_TEMP/caregiver-repair.XXXXXX")"
-          KC="caregiver-repair-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
+          TMP="$(mktemp -d "$RUNNER_TEMP/caregiver-original.XXXXXX")"
+          KC="caregiver-original-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
           KCPASS="$(openssl rand -hex 24)"
           cleanup() {
             security delete-keychain "$KC" >/dev/null 2>&1 || true
             rm -rf "$TMP"
           }
           trap cleanup EXIT
-          security create-keychain -p "$KCPASS" "$KC"
-          security unlock-keychain -p "$KCPASS" "$KC"
-          security set-keychain-settings -lut 3600 "$KC"
           AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
-
-          # Read-only import from the working Loop Match repository.
-          export MATCH_PASSWORD="$LOOP_MATCH_PASSWORD" MATCH_READONLY=true
-          bundle exec fastlane match appstore \
-            --readonly true \
-            --git_url "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Secrets.git" \
-            --git_branch master \
-            --git_basic_authorization "$AUTH" \
-            --app_identifier "com.${TEAMID}.loopkit.Loop" \
-            --skip_provisioning_profiles true \
-            --keychain_name "$KC" \
-            --keychain_password "$KCPASS"
-
-          COUNT="$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*\([0-9][0-9]*\) valid identities found.*/\1/p' | tail -1)"
-          [[ "$COUNT" == 1 ]] || { echo '::error::Expected exactly one valid signing identity'; exit 1; }
-
-          export EXPORT_PASS="$(openssl rand -hex 32)"
-          security export -k "$KC" -t identities -f pkcs12 \
-            -P "$EXPORT_PASS" -o "$TMP/exported.p12" >/dev/null
-          openssl pkcs12 -legacy -in "$TMP/exported.p12" \
-            -passin env:EXPORT_PASS -nodes -out "$TMP/identity.pem" >/dev/null 2>&1
-          openssl pkcs12 -export -in "$TMP/identity.pem" \
-            -out "$TMP/identity.p12" -passout pass: >/dev/null 2>&1
-          openssl pkcs12 -in "$TMP/identity.p12" -passin pass: \
-            -nocerts -nodes 2>/dev/null | openssl pkey -noout >/dev/null 2>&1
-          unset EXPORT_PASS
-          rm -f "$TMP/exported.p12" "$TMP/identity.pem"
-
-          # Locate the actual matching certificate in Loop's decrypted Match repo.
-          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" clone -q \
-            --branch master "https://github.com/$GITHUB_REPOSITORY_OWNER/Match-Secrets.git" "$TMP/source"
+          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" clone -q --branch master \
+            "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Secrets.git" "$TMP/source"
           MATCH_PASSWORD="$LOOP_MATCH_PASSWORD" bundle exec ruby -r match/encryption/openssl -e \
             'Match::Encryption::OpenSSL.new(working_directory: ARGV.fetch(0)).decrypt_files' "$TMP/source"
-          P12_FP="$(openssl pkcs12 -in "$TMP/identity.p12" -passin pass: -clcerts -nokeys 2>/dev/null | openssl x509 -noout -fingerprint -sha256)"
-          MATCHED_CERT=''
-          for cert in "$TMP"/source/certs/distribution/*.cer; do
-            [[ -f "$cert" ]] || continue
-            CERT_FP="$(openssl x509 -inform DER -in "$cert" -noout -fingerprint -sha256 2>/dev/null || true)"
-            if [[ -n "$CERT_FP" && "$CERT_FP" == "$P12_FP" ]]; then
-              MATCHED_CERT="$cert"
-              break
+
+          # Copy the ORIGINAL Match P12, not an OpenSSL-repacked copy.
+          # This is the exact format that the working Loop workflow imports.
+          CERT=''
+          P12=''
+          for c in "$TMP"/source/certs/distribution/*.cer; do
+            [[ -f "$c" ]] || continue
+            p="${c%.cer}.p12"
+            [[ -f "$p" ]] || continue
+            if openssl x509 -inform DER -in "$c" -noout -checkend 86400 >/dev/null 2>&1; then
+              [[ -z "$CERT" ]] || { echo '::error::Multiple valid certificate pairs; refusing ambiguous choice'; exit 1; }
+              CERT="$c"
+              P12="$p"
             fi
           done
-          [[ -n "$MATCHED_CERT" ]] || { echo '::error::No matching Loop distribution certificate found'; exit 1; }
-          CERT_NAME="$(basename "$MATCHED_CERT" .cer)"
+          [[ -n "$CERT" && -n "$P12" ]] || { echo '::error::No current Loop distribution certificate/P12 pair'; exit 1; }
+          NAME="$(basename "$CERT" .cer)"
 
-          # An orphan branch contains only newly encrypted files. No need to
-          # decrypt or modify the broken Match-Caregiver master branch.
-          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" clone -q \
-            --branch master "https://github.com/$GITHUB_REPOSITORY_OWNER/Match-Caregiver.git" "$TMP/dest"
+          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" clone -q --branch master \
+            "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Caregiver.git" "$TMP/dest"
           cd "$TMP/dest"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          BRANCH="caregiver-repair-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          BRANCH="caregiver-original-p12-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git checkout -q --orphan "$BRANCH"
           git rm -q -rf --ignore-unmatch .
-          # Remove any remaining untracked files, but never the .git directory.
           git clean -q -fdx
           mkdir -p certs/distribution
-          cp "$MATCHED_CERT" "certs/distribution/${CERT_NAME}.cer"
-          cp "$TMP/identity.p12" "certs/distribution/${CERT_NAME}.p12"
+          cp "$CERT" "certs/distribution/${NAME}.cer"
+          cp "$P12" "certs/distribution/${NAME}.p12"
           MATCH_PASSWORD="$CAREGIVER_MATCH_PASSWORD" bundle exec ruby -r match/encryption/openssl -e \
             'Match::Encryption::OpenSSL.new(working_directory: ARGV.fetch(0)).encrypt_files' "$TMP/dest"
-          # Ensure the newly written files are encrypted, not DER/PKCS12 plaintext.
-          if openssl x509 -inform DER -in "certs/distribution/${CERT_NAME}.cer" -noout >/dev/null 2>&1; then
-            echo '::error::Certificate is not encrypted'; exit 1
-          fi
-          if openssl pkcs12 -in "certs/distribution/${CERT_NAME}.p12" -passin pass: -noout >/dev/null 2>&1; then
-            echo '::error::P12 is not encrypted'; exit 1
-          fi
           git add certs/distribution
-          git commit -qm 'Stage existing Loop distribution identity for Caregiver'
+          git commit -qm 'Stage original working Loop P12 for Caregiver'
           git -c "http.extraheader=AUTHORIZATION: basic $AUTH" push -q origin "$BRANCH"
-          echo "::notice::Encrypted certificate staged on branch $BRANCH. Match-Caregiver master and Apple profiles unchanged."
+
+          # Read-only end-to-end check: decryption and macOS code-signing identity.
+          cd "$GITHUB_WORKSPACE"
+          security create-keychain -p "$KCPASS" "$KC"
+          security unlock-keychain -p "$KCPASS" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          MATCH_PASSWORD="$CAREGIVER_MATCH_PASSWORD" bundle exec fastlane match appstore \
+            --readonly true \
+            --git_url "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Caregiver.git" \
+            --git_branch "$BRANCH" \
+            --git_basic_authorization "$AUTH" \
+            --app_identifier "com.${TEAMID}.loopkit.LoopCaregiver" \
+            --skip_provisioning_profiles true \
+            --keychain_name "$KC" \
+            --keychain_password "$KCPASS"
+          COUNT="$(security find-identity -v -p codesigning "$KC" | awk '/valid identities found/ {print $1}' | tail -1)"
+          [[ "$COUNT" == 1 ]] || { echo '::error::Original P12 did not import as a valid signing identity'; exit 1; }
+          echo "::notice::SUCCESS: Original Loop P12 verified on $BRANCH. No Apple profiles or master branches changed."
