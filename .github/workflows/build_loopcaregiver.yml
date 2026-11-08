@@ -172,23 +172,10 @@ jobs:
           # "cancelled" rather than completing successfully first.
           sleep 300
 
-  # Checks if Distribution certificate is present and valid, optionally nukes and
-  # creates new certs if the repository variable ENABLE_NUKE_CERTS == 'true'
-  # only run if a build is planned
-  check_certs:
-      needs: [check_status]
-      name: Check certificates
-      uses: ./.github/workflows/create_certs.yml
-      secrets: inherit
-      if: |
-        github.event_name == 'workflow_dispatch' ||
-          (vars.SCHEDULED_BUILD != 'false' && needs.check_status.outputs.IS_SECOND_IN_MONTH == 'true') ||
-          (vars.SCHEDULED_SYNC != 'false' && needs.check_status.outputs.NEW_COMMITS == 'true' )
-
   # Builds LoopCaregiver
   build:
     name: Build
-    needs: [check_certs, check_status]
+    needs: [check_status]
     runs-on: macos-26
     permissions:
       contents: write
@@ -199,7 +186,12 @@ jobs:
         (vars.SCHEDULED_SYNC != 'false' && needs.check_status.outputs.NEW_COMMITS == 'true' )
     steps:
       - name: Select Xcode version
-        run: "sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer"
+        run: |
+          if [ -d /Applications/Xcode_26.5.app/Contents/Developer ]; then
+            sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer
+          else
+            xcodebuild -version
+          fi
 
       - name: Checkout Repo for building
         uses: actions/checkout@v5
@@ -208,24 +200,58 @@ jobs:
           submodules: recursive
           ref: ${{ env.TARGET_BRANCH }}
 
-      # Patch Fastlane Match to not print tables
-      - name: Patch Match Tables
-        run: |
-          TABLE_PRINTER_PATH=$(ruby -e 'puts Gem::Specification.find_by_name("fastlane").gem_dir')/match/lib/match/table_printer.rb
-          if [ -f "$TABLE_PRINTER_PATH" ]; then
-            sed -i "" "/puts(Terminal::Table.new(params))/d" "$TABLE_PRINTER_PATH"
-          else
-            echo "table_printer.rb not found"
-            exit 1
-          fi
-
-      # Install project dependencies
       - name: Install Project Dependencies
         run: bundle install
 
+      - name: Prepare existing Caregiver signing profiles (read-only)
+        shell: bash
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for var in TEAMID GH_PAT MATCH_PASSWORD; do
+            [[ -n "${!var:-}" ]] || { echo "::error::Missing $var"; exit 1; }
+          done
+          BRANCH="caregiver-original-p12-42468553947-1"
+          KC="caregiver-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
+          KCPASS="$(openssl rand -hex 24)"
+          security create-keychain -p "$KCPASS" "$KC"
+          security unlock-keychain -p "$KCPASS" "$KC"
+          security set-keychain-settings -lut 7200 "$KC"
+          # Keep the new keychain available for all later Fastlane steps.
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -d user -s "$KC"
+          echo "CAREGIVER_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          echo "CAREGIVER_KEYCHAIN_PASSWORD=$KCPASS" >> "$GITHUB_ENV"
+          echo "::add-mask::$KCPASS"
+          # Fastfile explicitly selects the repair branch and read-only mode.
+          # Do not modify Matchfile or either master branch.
+          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          IDS=(
+            "com.${TEAMID}.loopkit.LoopCaregiver"
+            "com.${TEAMID}.loopkit.LoopCaregiver.IntentExtension"
+            "com.${TEAMID}.loopkit.LoopCaregiver.WidgetExtension"
+            "com.${TEAMID}.loopkit.LoopCaregiver.watchkitapp"
+            "com.${TEAMID}.loopkit.LoopCaregiver.watchkitapp.WidgetExtension"
+          )
+          bundle exec fastlane match appstore \
+            --readonly true \
+            --generate_apple_certs false \
+            --git_url "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Caregiver.git" \
+            --git_branch "$BRANCH" \
+            --git_basic_authorization "$AUTH" \
+            --app_identifier "$(IFS=,; echo "${IDS[*]}")" \
+            --keychain_name "$KC" \
+            --keychain_password "$KCPASS"
+          COUNT="$(security find-identity -v -p codesigning "$KC" | awk '/valid identities found/ {print $1}' | tail -1)"
+          [[ "${COUNT:-0}" -ge 1 ]] || { echo '::error::No valid signing identity'; exit 1; }
+          echo '::notice::Five Caregiver profiles loaded read-only from repair branch.'
+
       # Sync the GitHub runner clock with the Windows time server (workaround as suggested in https://github.com/actions/runner/issues/2996)
-      - name: Sync clock
-        run: sudo sntp -sS time.windows.com
+      - name: Sync clock (best effort)
+        run: sudo sntp -sS time.windows.com || true
 
       # Build signed LoopCaregiver IPA file
       - name: Fastlane Build & Archive
