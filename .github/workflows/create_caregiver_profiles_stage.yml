@@ -1,0 +1,100 @@
+name: Create Caregiver profiles on repair branch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: caregiver-signing-repair
+  cancel-in-progress: false
+
+jobs:
+  create-profiles:
+    runs-on: macos-26-intel
+    timeout-minutes: 45
+    env:
+      TEAMID: ${{ secrets.TEAMID }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+      FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+      FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+      BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
+      REPAIR_BRANCH: caregiver-repair-42468007906-1
+
+    steps:
+      - name: Checkout LoopCaregiver
+        uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: bundle install
+
+      - name: Create five App Store profiles using existing distribution certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          for v in TEAMID GH_PAT MATCH_PASSWORD FASTLANE_KEY_ID FASTLANE_ISSUER_ID FASTLANE_KEY; do
+            [[ -n "${!v:-}" ]] || { echo "::error::Missing secret $v"; exit 1; }
+          done
+          TMP="$(mktemp -d "$RUNNER_TEMP/caregiver-profiles.XXXXXX")"
+          KC="caregiver-profiles-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
+          KCPASS="$(openssl rand -hex 24)"
+          cleanup() {
+            security delete-keychain "$KC" >/dev/null 2>&1 || true
+            rm -rf "$TMP"
+          }
+          trap cleanup EXIT
+          security create-keychain -p "$KCPASS" "$KC"
+          security unlock-keychain -p "$KCPASS" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+
+          # Fastlane API key JSON is written to a temporary private file only.
+          bundle exec ruby -r json -e '
+            File.write(ARGV.fetch(0), JSON.generate({
+              key_id: ENV.fetch("FASTLANE_KEY_ID"),
+              issuer_id: ENV.fetch("FASTLANE_ISSUER_ID"),
+              key: ENV.fetch("FASTLANE_KEY").gsub("\\n", "\n"),
+              in_house: false
+            }))
+          ' "$TMP/api_key.json"
+          AUTH="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          IDS=(
+            "com.${TEAMID}.loopkit.LoopCaregiver"
+            "com.${TEAMID}.loopkit.LoopCaregiver.IntentExtension"
+            "com.${TEAMID}.loopkit.LoopCaregiver.WidgetExtension"
+            "com.${TEAMID}.loopkit.LoopCaregiver.watchkitapp"
+            "com.${TEAMID}.loopkit.LoopCaregiver.watchkitapp.WidgetExtension"
+          )
+
+          # Fail before any Apple changes if the staged certificate cannot be read.
+          bundle exec fastlane match appstore \
+            --readonly true \
+            --git_url "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Caregiver.git" \
+            --git_branch "$REPAIR_BRANCH" \
+            --git_basic_authorization "$AUTH" \
+            --app_identifier "${IDS[0]}" \
+            --skip_provisioning_profiles true \
+            --keychain_name "$KC" \
+            --keychain_password "$KCPASS"
+          COUNT="$(security find-identity -v -p codesigning "$KC" | awk '/valid identities found/ {print $1}' | tail -1)"
+          [[ "$COUNT" == 1 ]] || { echo '::error::Staged signing identity is not valid'; exit 1; }
+
+          # With a valid certificate already present, Match should reuse it.
+          # This can create Apple provisioning profiles and push encrypted files
+          # to REPAIR_BRANCH. It does not intentionally create/revoke certificates.
+          bundle exec fastlane match appstore \
+            --readonly false \
+            --force false \
+            --generate_apple_certs false \
+            --git_url "https://github.com/${GITHUB_REPOSITORY_OWNER}/Match-Caregiver.git" \
+            --git_branch "$REPAIR_BRANCH" \
+            --git_basic_authorization "$AUTH" \
+            --api_key_path "$TMP/api_key.json" \
+            --app_identifier "$(IFS=,; echo "${IDS[*]}")" \
+            --keychain_name "$KC" \
+            --keychain_password "$KCPASS"
+
+          echo "::notice::Match completed for five Caregiver identifiers on $REPAIR_BRANCH. Check the log for all five profiles before merging."
